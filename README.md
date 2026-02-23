@@ -4,8 +4,8 @@ Our Solution: We provide an ML-powered platform leveraging satellite data to hel
 
 How to run: 
 0. Download the river dataset from the link: https://drive.google.com/drive/folders/1BN7roJyW6wZ-ibY5VkX-HSB80EFvyfJJ?usp=sharing and place them at Stack-Overflood/used_data/rivers_final/
-1.* In case it is needed, change path to the geopackage files accordingly inside the CSV: euhydro_tile_index_25km.csv
-2.* In case it is needed, change results path in BatchProcessParallel.py
+1. In case it is needed, change path to the geopackage files accordingly inside the CSV: euhydro_tile_index_25km.csv
+2. In case it is needed, change results path in BatchProcessParallel.py
 3. Add interest locations and date in Stack-Overflood/used_data/entries.csv, under the header, in center_lat,center_lon,center_date format
 4. Set the desired OFFSET inside the BatchProcessParallel.py
 5. Run BatchProcessParallel.py
