@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 import os
+from datetime import timedelta, timezone
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -280,6 +281,58 @@ def process_s1_series(lat, lon, start_date, end_date, side_m, resolution_m, conf
 # =========================
 # Sentinel-2 worker (thread)
 # =========================
+# Expanding S2 window in case of no available acquisitions
+def find_one_s2_with_expanding_window(
+    config,
+    bbox,
+    center_date_str: str,
+    initial_months_before=1.5,
+    initial_months_after=1.5,
+    max_expand_steps=20,
+    expand_days_each_step=15,
+    list_cloud=15,
+):
+    """
+    Returns:
+        (best_dt, used_start_date, used_end_date, found_count)
+    or
+        (None, start_date, end_date, 0)
+    """
+
+    center_ts = pd.to_datetime(center_date_str)
+    # convert to days
+    before_days = int(round(initial_months_before * 30))
+    after_days = int(round(initial_months_after * 30))
+
+    start_ts = center_ts - pd.Timedelta(days=before_days)
+    end_ts   = center_ts + pd.Timedelta(days=after_days)
+
+    for step in range(max_expand_steps + 1):
+        start_date = start_ts.date().isoformat()
+        end_date = end_ts.date().isoformat()
+
+        s2_dts = list_s2_acquisitions(
+            config=config,
+            bbox=bbox,
+            start_date=start_date,
+            end_date=end_date,
+            max_cloud=list_cloud
+        )
+
+        if s2_dts:
+            # choose one acquisition (closest to center date)
+            center_dt_utc = center_ts.to_pydatetime().replace(tzinfo=timezone.utc)
+            best_dt = min(s2_dts, key=lambda d: abs((d - center_dt_utc).total_seconds()))
+            return best_dt, start_date, end_date, len(s2_dts)
+
+        # expand symmetrically
+        start_ts -= pd.Timedelta(days=expand_days_each_step)
+        end_ts   += pd.Timedelta(days=expand_days_each_step)
+
+    # none found even after expansions
+    return None, start_ts.date().isoformat(), end_ts.date().isoformat(), 0
+
+
 def _process_one_s2_acquisition(s2_dt, lat, lon, side_m, resolution_m, config, results_dir, fetch_cloud=80):
     s2_interval = dt_to_day_interval(s2_dt)
     req_s2 = AOIRequest(lon, lat, side_m, resolution_m, s2_interval[0], s2_interval[1])
@@ -308,9 +361,9 @@ def _process_one_s2_acquisition(s2_dt, lat, lon, side_m, resolution_m, config, r
         **result_s2.get("s2_scalar_stats", {})
     }
 
-
+# Process S2 time series (all acquisitions in interval)
 def process_s2_series(lat, lon, start_date, end_date, side_m, resolution_m, config, results_dir,
-                      list_cloud=20, fetch_cloud=80):
+                      list_cloud=15, fetch_cloud=80):
     req_base = AOIRequest(
         center_lon=lon,
         center_lat=lat,
@@ -346,6 +399,87 @@ def process_s2_series(lat, lon, start_date, end_date, side_m, resolution_m, conf
     s2_timeseries.sort(key=lambda x: x["date"])
     return s2_timeseries
 
+# Process a single S2 acquisition
+def process_s2_single(
+    lat, lon,
+    center_date,
+    side_m, resolution_m,
+    config, results_dir,
+    list_cloud=15,
+    fetch_cloud=80
+):
+    req_base = AOIRequest(
+        center_lon=lon,
+        center_lat=lat,
+        side_m=side_m,
+        resolution_m=resolution_m,
+        start_date=center_date,  # temporary placeholders
+        end_date=center_date,
+    )
+    bbox = square_bbox_utm(req_base.center_lon, req_base.center_lat, req_base.side_m)
+
+    # Find exactly one S2 datetime (with expanding search)
+    best_dt, used_start, used_end, found_count = find_one_s2_with_expanding_window(
+        config=config,
+        bbox=bbox,
+        center_date_str=center_date,
+        initial_months_before=1.5,
+        initial_months_after=1.5,
+        max_expand_steps=8,
+        expand_days_each_step=15,
+        list_cloud=list_cloud,
+    )
+
+    info = {
+        "count_found_in_final_window": int(found_count),
+        "count_saved": 0,
+        "files": [],
+        "timeseries_s2": [],
+        "selection_window": {"start_date": used_start, "end_date": used_end},
+    }
+
+    if best_dt is None:
+        print("⚠️ No Sentinel-2 acquisitions found even after expanding window.")
+        return info
+
+    # Fetch only that day
+    s2_interval = dt_to_day_interval(best_dt)
+    req_s2 = AOIRequest(lon, lat, side_m, resolution_m, s2_interval[0], s2_interval[1])
+
+    try:
+        s2_pack = with_retries(fetch_s2_all_bands, req_s2, config, mosaicking="TILE", max_cloud=fetch_cloud)
+    except Exception as e:
+        print(f"⚠️ S2 fetch failed for selected date {best_dt}: {e}")
+        info["error"] = str(e)
+        return info
+
+    m = s2_pack.get("mask")
+    if m is None or float(np.mean(m)) < 0.001:
+        print(f"⚠️ Selected S2 mask empty for {best_dt}, skipping")
+        info["error"] = "Selected S2 mask empty"
+        return info
+
+    result_s2 = process_dataset_s2(s2_pack)
+
+    s2_tag = best_dt.strftime("S2_%Y%m%dT%H%M%SZ")
+    s2_name = f"data_{s2_tag}_{lat:.5f}_{lon:.5f}.h5"
+
+    s2_dir = os.path.join(results_dir, "S2")
+    os.makedirs(s2_dir, exist_ok=True)
+    s2_path = os.path.join(s2_dir, s2_name)
+
+    store_to_hdf5_s2(result_s2, s2_path)
+    print(f"✅ Saved {s2_name}")
+
+    info["count_saved"] = 1
+    info["files"] = [s2_name]
+    info["selected_datetime"] = best_dt.isoformat()
+    info["timeseries_s2"] = [{
+        "date": best_dt.strftime("%Y-%m-%d"),
+        **result_s2.get("s2_scalar_stats", {})
+    }]
+
+    return info
 
 # =========================
 # Context worker (thread): nearest water + DEM
@@ -445,14 +579,27 @@ def process_one_entry(lat: float, lon: float, center_date: str, config: SHConfig
             results_dir=results_dir
         )
 
+        # For series extraction
+        # fut_s2 = ex.submit(
+        #     process_s2_series,
+        #     lat=lat, lon=lon,
+        #     start_date=start_date, end_date=end_date,
+        #     side_m=S2_SIDE_M, resolution_m=S2_RES_M,
+        #     config=config,
+        #     results_dir=results_dir,
+        #     list_cloud=15,
+        #     fetch_cloud=80
+        # )
+
+        # For single extraction
         fut_s2 = ex.submit(
-            process_s2_series,
+            process_s2_single,
             lat=lat, lon=lon,
-            start_date=start_date, end_date=end_date,
+            center_date=center.isoformat(),
             side_m=S2_SIDE_M, resolution_m=S2_RES_M,
             config=config,
             results_dir=results_dir,
-            list_cloud=20,
+            list_cloud=15,
             fetch_cloud=80
         )
 

@@ -2,4 +2,4 @@ __pycache__/
 .env
 *.env
 Results/
-used_data/rivers_final/
+*.gpkg
