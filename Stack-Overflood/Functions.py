@@ -256,20 +256,40 @@ def fetch_s2_all_bands(req, config, mosaicking="ORBIT", max_cloud=30):
     bbox = square_bbox_utm(req.center_lon, req.center_lat, req.side_m)
     size = bbox_to_dimensions(bbox, resolution=req.resolution_m)
 
+    # All bands
+    # evalscript = """
+    # //VERSION=3
+    # function setup() {
+    #   return {
+    #     input: [{
+    #       bands: ["B01","B02","B03","B04","B05","B06","B07","B08","B8A","B09","B11","B12","dataMask"]
+    #     }],
+    #     output: { bands: 13, sampleType: "FLOAT32" }
+    #   };
+    # }
+    # function evaluatePixel(s) {
+    #   return [
+    #     s.B01, s.B02, s.B03, s.B04, s.B05, s.B06, s.B07,
+    #     s.B08, s.B8A, s.B09, s.B11, s.B12,
+    #     s.dataMask
+    #   ];
+    # }
+    # """
+    
+    # Only required bands
     evalscript = """
     //VERSION=3
     function setup() {
       return {
         input: [{
-          bands: ["B01","B02","B03","B04","B05","B06","B07","B08","B8A","B09","B11","B12","dataMask"]
+          bands: ["B02","B03","B04","B08","B11","dataMask"]
         }],
-        output: { bands: 13, sampleType: "FLOAT32" }
+        output: { bands: 6, sampleType: "FLOAT32" }
       };
     }
     function evaluatePixel(s) {
       return [
-        s.B01, s.B02, s.B03, s.B04, s.B05, s.B06, s.B07,
-        s.B08, s.B8A, s.B09, s.B11, s.B12,
+        s.B02, s.B03, s.B04, s.B08, s.B11,
         s.dataMask
       ];
     }
@@ -292,29 +312,37 @@ def fetch_s2_all_bands(req, config, mosaicking="ORBIT", max_cloud=30):
     )
 
     out = request.get_data()[0]  # H x W x 13
+    # All bands
+    # bands = {
+    #     "B01": out[..., 0].astype(np.float32),
+    #     "B02": out[..., 1].astype(np.float32),
+    #     "B03": out[..., 2].astype(np.float32),
+    #     "B04": out[..., 3].astype(np.float32),
+    #     "B05": out[..., 4].astype(np.float32),
+    #     "B06": out[..., 5].astype(np.float32),
+    #     "B07": out[..., 6].astype(np.float32),
+    #     "B08": out[..., 7].astype(np.float32),
+    #     "B8A": out[..., 8].astype(np.float32),
+    #     "B09": out[..., 9].astype(np.float32),
+    #     "B11": out[..., 10].astype(np.float32),
+    #     "B12": out[..., 11].astype(np.float32),
+    #     "mask": (out[..., 12] > 0.5),
+    # }
     bands = {
-        "B01": out[..., 0].astype(np.float32),
-        "B02": out[..., 1].astype(np.float32),
-        "B03": out[..., 2].astype(np.float32),
-        "B04": out[..., 3].astype(np.float32),
-        "B05": out[..., 4].astype(np.float32),
-        "B06": out[..., 5].astype(np.float32),
-        "B07": out[..., 6].astype(np.float32),
-        "B08": out[..., 7].astype(np.float32),
-        "B8A": out[..., 8].astype(np.float32),
-        "B09": out[..., 9].astype(np.float32),
-        "B11": out[..., 10].astype(np.float32),
-        "B12": out[..., 11].astype(np.float32),
-        "mask": (out[..., 12] > 0.5),
+        "B02": out[..., 0].astype(np.float32),
+        "B03": out[..., 1].astype(np.float32),
+        "B04": out[..., 2].astype(np.float32),
+        "B08": out[..., 3].astype(np.float32),
+        "B11": out[..., 4].astype(np.float32),
+        "mask": (out[..., 5] > 0.5),
     }
 
     # apply mask to bands (optional but recommended)
     m = bands["mask"]
-    for k in list(bands.keys()):
-        if k != "mask":
-            arr = bands[k]
-            arr[~m] = np.nan
-            bands[k] = arr
+    for k in ["B02", "B03", "B04", "B08", "B11"]:
+        arr = bands[k]
+        arr[~m] = np.nan
+        bands[k] = arr
 
     return bands
 
@@ -426,69 +454,3 @@ def empty_s2_like(shape):
     ndmi = np.full(shape, np.nan, np.float32)
     mask = np.zeros(shape, dtype=bool)
     return ndwi, ndvi, ndmi, mask
-
-
-
-api_key = "JLXL9D6SF43DJ4QB6CRCYHBAH"
-VC_API_KEY = os.environ.get("VISUALCROSSING_API_KEY", api_key)  # set in env, or hardcode
-VC_BASE = "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline"
-
-def fetch_precip_timeseries_visualcrossing(lat: float, lon: float, start_date: str, end_date: str):
-    """
-    Returns JSON-friendly list:
-    [
-      {"date": "YYYY-MM-DD", "precip": 1.2, "precipprob": 40, "precipcover": 12.5},
-      ...
-    ]
-    Units are metric because unitGroup=metric.
-    """
-    if not VC_API_KEY:
-        print("⚠️ VISUALCROSSING_API_KEY not set, skipping precip fetch.")
-        return []
-
-    url = f"{VC_BASE}/{lat},{lon}/{start_date}/{end_date}"
-    params = {
-        "unitGroup": "metric",
-        "include": "days",
-        "key": VC_API_KEY,
-        "contentType": "csv",
-    }
-
-    r = requests.get(url, params=params, timeout=60)
-    if r.status_code != 200:
-        print(f"⚠️ VisualCrossing failed: {r.status_code} {r.text[:200]}")
-        return []
-
-    df = pd.read_csv(StringIO(r.text))
-
-    # Some exports name the column "datetime"; keep robust
-    if "datetime" not in df.columns:
-        # try common alternatives
-        for c in ["date", "datetimeStr", "DateTime"]:
-            if c in df.columns:
-                df = df.rename(columns={c: "datetime"})
-                break
-
-    keep = []
-    for _, row in df.iterrows():
-        date_str = str(row.get("datetime", ""))[:10]
-        if not date_str or date_str == "nan":
-            continue
-
-        def fnum(x):
-            try:
-                return float(x)
-            except Exception:
-                return None
-
-        keep.append({
-            "date": date_str,
-            "precip": fnum(row.get("precip")),
-            "precipcover": fnum(row.get("precipcover")),
-            "humidity": fnum(row.get("humidity")),
-            "temp_min": fnum(row.get("tempmin")),
-            "temp_max": fnum(row.get("tempmax")),
-            "temp_avg": fnum(row.get("temp")),
-        })
-
-    return keep

@@ -86,7 +86,7 @@ def nearest_water_distance(lon, lat, tile_index_csv, tile_m=25000, search_radius
     best_meta = None
 
     for (gpkg_path, layer), _ in sub.groupby(["gpkg_path", "layer"]):
-        gdf = gpd.read_file(gpkg_path, layer=layer)
+        gdf = gpd.read_file(gpkg_path, layer=layer, columns=[])
         gdf = gdf[gdf.geometry.notna()]
         if gdf.empty:
             continue

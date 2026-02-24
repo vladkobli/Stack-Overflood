@@ -98,10 +98,16 @@ def process_dataset_s2(s2_pack=None):
     valid = s2_mask
     result["valid_mask"] = valid.astype(np.uint8)
 
-    for b in ["B01","B02","B03","B04","B05","B06","B07","B08","B8A","B09","B11","B12"]:
+    # All bands
+    # for b in ["B01","B02","B03","B04","B05","B06","B07","B08","B8A","B09","B11","B12"]:
+    #     if b in s2_pack:
+    #         arr = s2_pack[b].astype(np.float32)
+    #         result[b] = arr
+    
+    # Only needed bands
+    for b in ["B02","B03","B04","B08","B11"]:
         if b in s2_pack:
             arr = s2_pack[b].astype(np.float32)
-            # arr[~valid] = np.nan
             result[b] = arr
 
     ndvi = _nd(result["B08"], result["B04"]) if ("B08" in result and "B04" in result) else None
